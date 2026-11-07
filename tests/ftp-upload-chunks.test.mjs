@@ -67,8 +67,10 @@ const job = () => Buffer.from(Array.from({ length: SIZE }, (_, i) => (i * 31 + 7
 
 test("a single-write upload of a multi-megabyte job hits the data-socket timeout while bytes still flow", async t => {
   // What ftpUpload did through 1.1.73: Readable.from(buffer) yields the whole file as one write.
+  // A loopback buffer big enough to accept that write reports the same unfinished transfer as
+  // "Timeout (control socket)" while waiting for 226. Either way the upload did not complete.
   const { client } = await slowPrinter(t);
-  await assert.rejects(client.uploadFrom(Readable.from(job()), "/cache/job.3mf"), /Timeout \(data socket\)/);
+  await assert.rejects(client.uploadFrom(Readable.from(job()), "/cache/job.3mf"), /Timeout \((?:data|control) socket\)/);
 });
 
 test("uploadBytes stores a multi-megabyte job on a slow printer within the same inactivity timeout", async t => {
@@ -97,7 +99,7 @@ test("uploadBytes waits out a printer pausing mid-file longer than the command t
 
 test("with only the command timeout, the same mid-file pause is reported as a stall", async t => {
   const { client } = await slowPrinter(t, { pauseAt: SIZE * 0.7, pauseMs: TIMEOUT_MS * 2 });
-  await assert.rejects(uploadBytes(client, job(), "/cache/job.3mf", { stallMs: 0 }), /Timeout \(data socket\)/);
+  await assert.rejects(uploadBytes(client, job(), "/cache/job.3mf", { stallMs: 0 }), /Timeout \((?:data|control) socket\)/);
   assert.equal(client.ftp.timeout, TIMEOUT_MS);
 });
 

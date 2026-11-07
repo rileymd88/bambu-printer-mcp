@@ -148,7 +148,7 @@ for (const type of ["gcode", "3mf", "txt"]) {
   });
 }
 
-function fakeFtp(t, entries, listError) {
+function fakeFtp(t, entries, listError, size) {
   const events = [];
   t.mock.method(FTPClient.prototype, "access", async options => { events.push({ action: "access", options }); });
   t.mock.method(FTPClient.prototype, "list", async remote => {
@@ -160,6 +160,14 @@ function fakeFtp(t, entries, listError) {
     const chunks = [];
     for await (const chunk of stream) chunks.push(Buffer.from(chunk));
     events.push({ action: "upload", remote, bytes: Buffer.concat(chunks) });
+  });
+  t.mock.method(FTPClient.prototype, "size", async remote => {
+    events.push({ action: "size", remote });
+    if (size instanceof Error) throw size;
+    if (typeof size === "number") return size;
+    const uploaded = events.findLast(event => event.action === "upload" && event.remote === remote);
+    if (!uploaded) throw new Error(`SIZE before STOR for ${remote}`);
+    return uploaded.bytes.length;
   });
   const printer = new BambuImplementation();
   printer.waitForTlsSession = async () => {};
@@ -184,10 +192,12 @@ test("FTP retains the exact checked path after confirming it is unused", async t
   const file = await artifact(t);
   const { printer, events } = fakeFtp(t, [{ name: "other.gcode" }]);
   await printer.ftpUpload(credentials[0], credentials[2], file, "/cache/checked-new.gcode");
-  assert.deepEqual(events.map(event => event.action), ["access", "list", "upload"]);
+  assert.deepEqual(events.map(event => event.action), ["access", "list", "upload", "size"]);
   assert.equal(events[1].remote, "/cache");
   assert.equal(events[2].remote, "/cache/checked-new.gcode");
+  assert.equal(events[3].remote, "/cache/checked-new.gcode");
   assert.deepEqual(events[2].bytes, await fs.readFile(file));
+  assert.equal(events.filter(event => event.action === "access").length, 1);
 });
 
 // basic-ftp reuses these options for every TLS data connection. Without the
@@ -201,6 +211,34 @@ test("FTP TLS options carry the printer host for data-channel session reuse", as
   assert.equal(options.host, "192.168.0.175");
   assert.equal(options.secure, "implicit");
   assert.equal(options.secureOptions.host, "192.168.0.175");
+  assert.equal(options.secureOptions.rejectUnauthorized, false);
+  assert.equal(events.filter(event => event.action === "access").length, 1);
+});
+
+test("FTP refuses a stored size that is not the inspected file and does not open another upload", async t => {
+  const file = await artifact(t, "1234567890");
+  const logs = [];
+  t.mock.method(console, "error", line => { logs.push(String(line)); });
+  const { printer, events } = fakeFtp(t, [], undefined, 4);
+  await assert.rejects(
+    printer.ftpUpload(credentials[0], "ACCESS-CODE-12345678", file, "/cache/checked-new.gcode"),
+    /verify-size: 10 of 10.*reports 4 stored bytes.*must not be printed/s,
+  );
+  assert.equal(events.filter(event => event.action === "upload").length, 1);
+  assert.equal(events.filter(event => event.action === "access").length, 1, "a known short SIZE is not a second transfer");
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /^ftps upload: /);
+  assert.equal(logs.some(line => line.includes("ACCESS-CODE-12345678")), false);
+});
+
+test("FTP refuses an upload whose stored size cannot be read", async t => {
+  const file = await artifact(t, "12345");
+  const { printer, events } = fakeFtp(t, [], undefined, new Error("500 SIZE not understood"));
+  await assert.rejects(
+    printer.ftpUpload(credentials[0], credentials[2], file, "/cache/checked-new.gcode"),
+    /verify-size: 5 of 5.*could not be read.*500 SIZE not understood.*must not be printed/s,
+  );
+  assert.equal(events.filter(event => event.action === "access").length, 1);
 });
 
 for (const tool of ["upload_file", "upload_gcode"]) {

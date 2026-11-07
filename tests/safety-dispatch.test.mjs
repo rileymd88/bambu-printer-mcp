@@ -9,6 +9,7 @@ import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import JSZip from "jszip";
 import { BambuImplementation } from "../dist/printers/bambu.js";
+import { UploadTransferError } from "../dist/printers/ftp-upload.js";
 import { BambuNetworkBridge } from "../dist/bambu-network-bridge.js";
 import { withPrintSnapshot } from "../dist/safety/artifact.js";
 import { studioAmsMappingInfo, trayColour } from "../dist/ams-mapping.js";
@@ -1210,6 +1211,32 @@ test("a failed upload refuses with a stable code and sends no print command", as
     error => error.code === "printer-upload-failed" && /did not reach the printer.*Timeout \(data socket\).*No print was started/s.test(error.message));
   assert.deepEqual(events.filter(({ action }) => action === "upload-attempt").length, 1);
   assert.deepEqual(events.filter(({ action }) => action === "connect" || action === "publish"), [], "no print command after a failed upload");
+});
+
+test("a partial upload names the cache file and sends no print command", async (t) => {
+  const file = await fixture(t);
+  const { printer, events } = isolatedPrinter();
+  printer.ftpUpload = async () => {
+    events.push({ action: "upload-attempt" });
+    throw new UploadTransferError(new Error(`Timeout (data socket) ${token}`), {
+      stage: "store",
+      bytesSent: 65536,
+      bytesTotal: 4847245,
+      remotePath: "/cache/checked-example-carousel-stock-verified-plate1.3mf",
+      remoteBytes: 65536,
+      secrets: [token],
+    });
+  };
+  await assert.rejects(printer.print3mf(host, serial, token, {
+    projectName: "carousel", filePath: file, bambuModel: "p1s", useAMS: false,
+  }), error => error.code === "printer-upload-failed"
+    && /store: 65536 of 4847245/.test(error.message)
+    && /checked-example-carousel-stock-verified-plate1\.3mf/.test(error.message)
+    && /reports 65536 stored bytes/.test(error.message)
+    && /must not be printed/.test(error.message)
+    && /No print command was sent/.test(error.message)
+    && !error.message.includes(token));
+  assert.deepEqual(events.filter(({ action }) => action === "connect" || action === "publish"), []);
 });
 
 test("FINISH adds no plate confirmation, and an ordinary print does not ask", async (t) => {

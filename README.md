@@ -938,7 +938,7 @@ The primary tool for starting a Bambu print. **Recommended input: a pre-sliced `
 2. If no G-code is found, attempts to auto-slice via the configured slicer. Profile preparation or slicing failures stop the operation before upload. See the slicing guide for tested CLI versions and combinations.
 3. Parses the sliced 3MF to extract the correct plate file and compute its MD5 hash.
 4. Reads slicer metadata and any explicit AMS selection to build the filament mapping.
-5. Uploads via `basic-ftp` to the model-specific location: SD root for H2/full-size A1, `cache/` for P1/X1/A1 mini/P2S. X2D `print_3mf` instead uses its checked native route on macOS or Linux, which stores the job on a ready SD card or USB stick and otherwise on internal storage (eMMC).
+5. Uploads via `basic-ftp` to the model-specific location: SD root for H2/full-size A1, `cache/` for P1/X1/A1 mini/P2S. The upload is the inspected snapshot, written in 64 KiB pieces so a slow card is not reported as a stalled data socket. After the printer accepts the transfer, `SIZE` must match that snapshot; a timeout, a short file, or a size that cannot be read does not start a print. The error names the remote file and the byte counts and omits the access code. A name that appears in a directory listing after a failed upload is not a complete file. X2D `print_3mf` instead uses its checked native route on macOS or Linux, which stores the job on a ready SD card or USB stick and otherwise on internal storage (eMMC). Data-channel TLS stays on.
 6. Sends the correct MQTT print command for the target printer family. For H2S/H2D/H2C that means `project_file` with project-length `ams_mapping`, parallel `ams_mapping2`, and H2-compatible calibration flags.
 
 ```json

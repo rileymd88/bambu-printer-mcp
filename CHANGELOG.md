@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- An FTPS upload is printed only when the printer's `SIZE` matches the inspected bytes. `print_3mf` on an A1 mini, and every other model that uploads over FTPS, reads the snapshot once and sends it in 64 KiB writes. A data-socket timeout, a shorter stored file, or a size that cannot be read fails the upload: the error names the remote file and how many bytes were handed to the socket, a read-only `SIZE` says what the printer kept when it can be read, and no print command is sent. The access code is not included. A directory entry left behind by the failed transfer is not a complete file and is not started. On 1.1.69 a 4,847,245-byte A1 mini plate failed with "Timeout (data socket)" after the printer had created the cache name; that release gave basic-ftp the whole file as one write, and basic-ftp 6.2.6 reports a stall when queued bytes stop moving for the 15 s command limit. Data-channel TLS is unchanged. Checked with that plate against a local server that pauses longer than the old limit, including a transfer that stores every byte but never confirms, and with a stored size that does not match. No printer was contacted.
+
 ## [1.1.77] – 2026-11-07
 
 ### Fixed
