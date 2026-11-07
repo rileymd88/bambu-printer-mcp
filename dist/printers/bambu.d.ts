@@ -355,10 +355,20 @@ export declare class BambuImplementation {
      */
     private ftpDelete;
     /**
+     * Open one implicit-FTPS session. Data connections keep the same TLS options,
+     * including the printer host so the session can be resumed. The data channel stays encrypted.
+     */
+    private openUploadClient;
+    /**
      * Upload a file to the printer via FTP using basic-ftp directly.
      * Bypasses bambu-js's sendFile which has a double-path bug (ensureDir CDs
      * into the target directory, then uploadFrom uses the full relative path
      * again, resulting in e.g. /cache/cache/file.3mf).
+     *
+     * basic-ftp raises "Timeout (data socket)" only after the data connection's TLS
+     * handshake (`secureConnect`), while queued bytes stop moving. That is a stalled
+     * transfer, not a reason to send the file in the clear. STOR may already have
+     * created the remote name; the print starts only after SIZE matches the bytes read here.
      */
     private ftpUpload;
     private waitForTlsSession;

@@ -19,7 +19,7 @@ import { withPrinterOperation, withPrintSnapshot, uniquePrintName, normalizedRem
 import { RTSP_CAMERA_MODELS, TCP_CAMERA_MODELS } from "./camera-models.js";
 import { resolveStudioPrintOptions, usedNozzleCount } from "../studio-print-options.js";
 import { Client as FTPClient } from "basic-ftp";
-import { uploadBytes } from "./ftp-upload.js";
+import { incompleteUpload, measureRemoteFile, storeVerifiedBytes, UploadTransferError } from "./ftp-upload.js";
 import * as mqtt from "mqtt";
 import { BambuClient, GCodeFileCommand, GCodeLineCommand, PushAllCommand, UpdateFanCommand, UpdateLightCommand, } from "bambu-node";
 /**
@@ -1092,8 +1092,12 @@ export class BambuImplementation {
             await this.ftpUpload(host, token, options.filePath, remoteUploadPath, options.onUploadProgress);
         }
         catch (error) {
-            // Nothing has been sent to the printer but (part of) a file, so the print certainly did not start.
-            throw new PrinterRefusal("printer-upload-failed", `The print file did not reach the printer (${error instanceof Error ? error.message : String(error)}). No print was started.`);
+            // A listed cache name is not a finished upload. No project_file / gcode_file command is sent.
+            const detail = error instanceof Error ? error.message : String(error);
+            if (error instanceof UploadTransferError) {
+                throw new PrinterRefusal("printer-upload-failed", `${detail} No print command was sent.`);
+            }
+            throw new PrinterRefusal("printer-upload-failed", `The print file did not reach the printer (${detail}). No print was started.`);
         }
         // Uploads can be long. Recheck current state before the command is dispatched.
         const dispatchStatus = await this.getSafetyStatus(host, serial, token);
@@ -2243,12 +2247,10 @@ export class BambuImplementation {
         }
     }
     /**
-     * Upload a file to the printer via FTP using basic-ftp directly.
-     * Bypasses bambu-js's sendFile which has a double-path bug (ensureDir CDs
-     * into the target directory, then uploadFrom uses the full relative path
-     * again, resulting in e.g. /cache/cache/file.3mf).
+     * Open one implicit-FTPS session. Data connections keep the same TLS options,
+     * including the printer host so the session can be resumed. The data channel stays encrypted.
      */
-    async ftpUpload(host, token, localPath, remotePath, onProgress) {
+    async openUploadClient(host, token) {
         const client = new FTPClient(15000);
         try {
             await client.access({
@@ -2264,16 +2266,46 @@ export class BambuImplementation {
             // ticket hasn't arrived yet, causing a fresh TLS negotiation that Bambu
             // printers reject. Wait for the session ticket before proceeding.
             await this.waitForTlsSession(client);
+            return client;
+        }
+        catch (error) {
+            client.close();
+            throw error;
+        }
+    }
+    /**
+     * Upload a file to the printer via FTP using basic-ftp directly.
+     * Bypasses bambu-js's sendFile which has a double-path bug (ensureDir CDs
+     * into the target directory, then uploadFrom uses the full relative path
+     * again, resulting in e.g. /cache/cache/file.3mf).
+     *
+     * basic-ftp raises "Timeout (data socket)" only after the data connection's TLS
+     * handshake (`secureConnect`), while queued bytes stop moving. That is a stalled
+     * transfer, not a reason to send the file in the clear. STOR may already have
+     * created the remote name; the print starts only after SIZE matches the bytes read here.
+     */
+    async ftpUpload(host, token, localPath, remotePath, onProgress) {
+        const absoluteRemote = remotePath.startsWith("/") ? remotePath : `/${remotePath}`;
+        const client = await this.openUploadClient(host, token);
+        try {
             // Use absolute path to avoid CWD side-effects
-            const absoluteRemote = remotePath.startsWith("/") ? remotePath : `/${remotePath}`;
             const entries = await client.list(path.posix.dirname(absoluteRemote));
             const destinationName = path.posix.basename(absoluteRemote).toLowerCase();
             if (entries.some(entry => entry.name.toLowerCase() === destinationName)) {
                 throw new Error(`Refusing to overwrite existing printer file ${absoluteRemote}. Choose a new filename.`);
             }
             const fileData = await fs.readFile(localPath);
-            // Small writes, so a multi-megabyte job on a slow SD card is not mistaken for a stall.
-            await uploadBytes(client, fileData, absoluteRemote, { onProgress });
+            // Small writes, then SIZE, so a multi-megabyte job is not printed from a partial cache entry.
+            await storeVerifiedBytes(client, fileData, absoluteRemote, { onProgress });
+        }
+        catch (error) {
+            if (!(error instanceof UploadTransferError))
+                throw error;
+            // Drop the stalled session before the read-only SIZE, so the probe is not stuck behind it.
+            client.close();
+            const reported = await incompleteUpload(error, () => measureRemoteFile(() => this.openUploadClient(host, token), absoluteRemote, [token]), [token]);
+            console.error(reported.logLine);
+            throw reported;
         }
         finally {
             client.close();
